@@ -17,6 +17,11 @@ typedef struct {
 // store private data for all the instances of the gadget - may be more than 1
 static Eina_List *_instances = NULL;
 
+static E_Config_DD *conf_edd = NULL;
+static E_Config_DD *conf_item_edd = NULL;
+
+Config *gad_config = NULL;
+
 static void
 _popup_free(Instance *inst)
 {
@@ -39,7 +44,9 @@ static Eina_Bool
 _cb_key_down(void *data, Ecore_Event_Key *ev)
 {
    if (!strcmp(ev->key, "Escape")) _popup_free(data);
-   return ECORE_CALLBACK_PASS_ON;}
+   return ECORE_CALLBACK_PASS_ON;
+}
+
 
 
 static void
@@ -48,6 +55,10 @@ _cb_mouse_down(void *data, Evas *e, Evas_Object *obj, void *event)
    Instance *inst = data;
    Evas_Event_Mouse_Down *ev = event;
    char buf[64];
+   
+   E_Menu *m;
+   E_Menu_Item *mi;
+   int cx, cy;
 
    if ((ev->button == 1)) // left mouse
      {
@@ -76,6 +87,26 @@ _cb_mouse_down(void *data, Evas *e, Evas_Object *obj, void *event)
         // ensure smart objects update
         evas_smart_objects_calculate(e);
         e_gadcon_popup_content_set(inst->popup, inst->popup_label);
+     }
+      else if (ev->button == 3)
+     {
+
+         m = e_menu_new();
+         mi = e_menu_item_new(m);
+         e_menu_item_label_set(mi, "Settings");
+         e_util_menu_item_theme_icon_set(mi, "configure");
+         e_menu_item_callback_set(mi, _config_gad_module, inst);
+
+         m = e_gadcon_client_util_menu_items_append(inst->gcc, m, 0);
+
+         e_gadcon_canvas_zone_geometry_get(inst->gcc->gadcon,
+                                          &cx, &cy, NULL, NULL);
+         e_menu_activate_mouse(m,
+                              e_zone_current_get(),
+                              cx + ev->output.x, cy + ev->output.y, 1, 1,
+                              E_MENU_POP_DIRECTION_DOWN, ev->timestamp);
+         evas_event_feed_mouse_up(inst->gcc->gadcon->evas, ev->button,
+                                 EVAS_BUTTON_NONE, ev->timestamp, NULL);
      }
 }
 
@@ -139,9 +170,13 @@ static void
 _gc_shutdown(E_Gadcon_Client *gcc)
 {  // shutdown the gadget - free out instance data then
    Instance *inst = gcc->data;
-   _popup_free(inst);
+//    _popup_free(inst);
+   
+   
+   gad_config->instances = eina_list_remove(gad_config->instances, inst);
    _instances = eina_list_remove(_instances, inst);
    E_FREE(inst);
+
 }
 
 static void
@@ -173,8 +208,30 @@ static const char *
 _gc_id_new(const E_Gadcon_Client_Class *client_class)
 { // return a string "id" for this gadget to use in config like shelf to
    // identify this gadget - make it unique for this gadget
-   return _gc_class.name;
+   static char buf[4096];
+
+   snprintf(buf, sizeof(buf), "%s.%d", client_class->name,
+            eina_list_count(gad_config->instances) + 1);
+   return buf;
+   
+//    return _gc_class.name;
 }
+
+
+static Config_Item *
+_gad_config_item_get(const char *id)
+{
+   Config_Item *ci;
+
+   GADCON_CLIENT_CONFIG_GET(Config_Item, gad_config->items, _gc_class, id);
+
+   ci = E_NEW(Config_Item, 1);
+   ci->id = eina_stringshare_add(id);
+   ci->enable_switch = 1;
+   gad_config->items = eina_list_append(gad_config->items, ci);
+   return ci;
+}
+
 
 ////////////////////////////////////////////////////////////////////////////
 // core api for all modules if they have gadgets or not - e calls these
@@ -189,6 +246,38 @@ E_API E_Module_Api e_modapi =
 E_API void *
 e_modapi_init(E_Module *m)
 {  // called when e loads this module
+///
+   conf_item_edd = E_CONFIG_DD_NEW("Gad_Config_Item", Config_Item);
+   #undef T
+   #undef D
+   #define T Config_Item
+   #define D conf_item_edd
+   E_CONFIG_VAL(D, T, id, STR);
+   E_CONFIG_VAL(D, T, enable_switch, INT);
+
+   conf_edd = E_CONFIG_DD_NEW("Gad_Config", Config);
+   #undef T
+   #undef D
+   #define T Config
+   #define D conf_edd
+   E_CONFIG_LIST(D, T, items, conf_item_edd);
+
+   gad_config = e_config_domain_load("module.gad", conf_edd);
+   if (!gad_config)
+     {
+        Config_Item *ci;
+
+        gad_config = E_NEW(Config, 1);
+
+        ci = E_NEW(Config_Item, 1);
+        ci->id = eina_stringshare_add("gad.1");
+        ci->enable_switch = 0;
+        gad_config->items = eina_list_append(gad_config->items, ci);
+     }
+
+   gad_config->module = m;
+
+   ///
    _module = m; // store module handle that e passes in to use later
    e_gadcon_provider_register(&_gc_class); // register our gadcon class
    return m;
@@ -197,12 +286,34 @@ e_modapi_init(E_Module *m)
 E_API int
 e_modapi_shutdown(E_Module *m)
 {  // called when e unloads this modue - clean up everything we created
-   e_gadcon_provider_unregister(&_gc_class); // unregister class
+   
+
+   Config_Item *ci;
+   e_gadcon_provider_unregister(&_gc_class);
+
+   E_FREE_LIST(gad_config->handlers, ecore_event_handler_del);
+
+   while (gad_config->config_dialog)
+     /* there is no need to eves_list_remove_list. It is done implicitly in
+      * dialog _free_data function
+      */
+     e_object_del(E_OBJECT(gad_config->config_dialog->data));
+
+   EINA_LIST_FREE(gad_config->items, ci)
+     {
+        eina_stringshare_del(ci->id);
+        free(ci);
+     }
+
+   E_FREE(gad_config);
+   E_CONFIG_DD_FREE(conf_item_edd);
+   E_CONFIG_DD_FREE(conf_edd);
    return 1;
 }
 
 E_API int
 e_modapi_save(E_Module *m)
 {  // called when e wants this module to save its config - no config to save
+   e_config_domain_save("module.gad", conf_edd, gad_config);
    return 1;
 }
