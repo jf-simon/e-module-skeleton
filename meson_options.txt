@@ -1,0 +1,6 @@
+option('edje-cc',
+       type       : 'string',
+       description: 'A path to a edje_cc. Defaults to system edje_cc')
+option('home',
+       type       : 'string',
+       description: 'Home directory location for a user private install')
